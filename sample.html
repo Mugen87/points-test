@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgl - PLY to sampled point cloud</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<link type="text/css" rel="stylesheet" href="https://threejs.org/examples/main.css">
+	</head>
+	<body>
+
+		<script type="module">
+
+			import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.122/build/three.module.js';
+
+			import { PLYLoader } from 'https://cdn.jsdelivr.net/npm/three@0.122/examples/jsm/loaders/PLYLoader.js';
+			import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.122/examples/jsm/controls/OrbitControls.js';
+
+			import { GUI } from 'https://cdn.jsdelivr.net/npm/three@0.122/examples/jsm/libs/dat.gui.module.js';
+
+			// custom MeshSurfaceSampler supporting vertex colors
+
+			var MeshSurfaceSampler = ( function () {
+
+				var _face = new THREE.Triangle();
+
+				function MeshSurfaceSampler( mesh ) {
+
+					var geometry = mesh.geometry;
+
+					if ( ! geometry.isBufferGeometry || geometry.attributes.position.itemSize !== 3 ) {
+
+						throw new Error( 'THREE.MeshSurfaceSampler: Requires BufferGeometry triangle mesh.' );
+
+					}
+
+					if ( geometry.index ) {
+
+						console.warn( 'THREE.MeshSurfaceSampler: Converting geometry to non-indexed BufferGeometry.' );
+
+						geometry = geometry.toNonIndexed();
+
+					}
+
+					this.geometry = geometry;
+					this.randomFunction = Math.random;
+
+					this.positionAttribute = this.geometry.getAttribute( 'position' );
+					this.colorAttribute = this.geometry.getAttribute( 'color' );
+					this.weightAttribute = null;
+
+					this.distribution = null;
+
+				}
+
+				MeshSurfaceSampler.prototype = {
+
+					constructor: MeshSurfaceSampler,
+
+					setWeightAttribute: function ( name ) {
+
+						this.weightAttribute = name ? this.geometry.getAttribute( name ) : null;
+
+						return this;
+
+					},
+
+					build: function () {
+
+						var positionAttribute = this.positionAttribute;
+						var weightAttribute = this.weightAttribute;
+
+						var faceWeights = new Float32Array( positionAttribute.count / 3 );
+
+						// Accumulate weights for each mesh face.
+
+						for ( var i = 0; i < positionAttribute.count; i += 3 ) {
+
+							var faceWeight = 1;
+
+							if ( weightAttribute ) {
+
+								faceWeight = weightAttribute.getX( i )
+									+ weightAttribute.getX( i + 1 )
+									+ weightAttribute.getX( i + 2 );
+
+							}
+
+							_face.a.fromBufferAttribute( positionAttribute, i );
+							_face.b.fromBufferAttribute( positionAttribute, i + 1 );
+							_face.c.fromBufferAttribute( positionAttribute, i + 2 );
+							faceWeight *= _face.getArea();
+
+							faceWeights[ i / 3 ] = faceWeight;
+
+						}
+
+						// Store cumulative total face weights in an array, where weight index
+						// corresponds to face index.
+
+						this.distribution = new Float32Array( positionAttribute.count / 3 );
+
+						var cumulativeTotal = 0;
+
+						for ( var i = 0; i < faceWeights.length; i ++ ) {
+
+							cumulativeTotal += faceWeights[ i ];
+
+							this.distribution[ i ] = cumulativeTotal;
+
+						}
+
+						return this;
+
+					},
+
+					setRandomGenerator: function ( randomFunction ) {
+
+						this.randomFunction = randomFunction;
+						return this;
+
+					},
+
+					sample: function ( targetPosition, targetNormal, targetColor ) {
+
+						var cumulativeTotal = this.distribution[ this.distribution.length - 1 ];
+
+						var faceIndex = this.binarySearch( this.randomFunction() * cumulativeTotal );
+
+						return this.sampleFace( faceIndex, targetPosition, targetNormal, targetColor );
+
+					},
+
+					binarySearch: function ( x ) {
+
+						var dist = this.distribution;
+						var start = 0;
+						var end = dist.length - 1;
+
+						var index = - 1;
+
+						while ( start <= end ) {
+
+							var mid = Math.ceil( ( start + end ) / 2 );
+
+							if ( mid === 0 || dist[ mid - 1 ] <= x && dist[ mid ] > x ) {
+
+								index = mid;
+
+								break;
+
+							} else if ( x < dist[ mid ] ) {
+
+								end = mid - 1;
+
+							} else {
+
+								start = mid + 1;
+
+							}
+
+						}
+
+						return index;
+
+					},
+
+					sampleFace: function ( faceIndex, targetPosition, targetNormal, targetColor ) {
+
+						var u = this.randomFunction();
+						var v = this.randomFunction();
+
+						if ( u + v > 1 ) {
+
+							u = 1 - u;
+							v = 1 - v;
+
+						}
+
+						//
+
+						_face.a.fromBufferAttribute( this.positionAttribute, faceIndex * 3 );
+						_face.b.fromBufferAttribute( this.positionAttribute, faceIndex * 3 + 1 );
+						_face.c.fromBufferAttribute( this.positionAttribute, faceIndex * 3 + 2 );
+
+						targetPosition
+							.set( 0, 0, 0 )
+							.addScaledVector( _face.a, u )
+							.addScaledVector( _face.b, v )
+							.addScaledVector( _face.c, 1 - ( u + v ) );
+
+						_face.getNormal( targetNormal );
+
+						//
+
+						_face.a.fromBufferAttribute( this.colorAttribute, faceIndex * 3 );
+						_face.b.fromBufferAttribute( this.colorAttribute, faceIndex * 3 + 1 );
+						_face.c.fromBufferAttribute( this.colorAttribute, faceIndex * 3 + 2 );
+
+						targetColor
+							.set( 0, 0, 0 )
+							.addScaledVector( _face.a, u )
+							.addScaledVector( _face.b, v )
+							.addScaledVector( _face.c, 1 - ( u + v ) );
+
+						return this;
+
+					}
+
+				};
+
+				return MeshSurfaceSampler;
+
+			} )();
+
+			//
+
+			let container;
+
+			let camera, scene, renderer, mesh;
+
+			init();
+			animate();
+
+			function init() {
+
+				container = document.createElement( 'div' );
+				document.body.appendChild( container );
+
+				camera = new THREE.PerspectiveCamera( 35, window.innerWidth / window.innerHeight, 0.1, 50 );
+				camera.position.set( - 5, 3, - 5 );
+
+				scene = new THREE.Scene();
+
+				const loader = new PLYLoader();
+				loader.load( './assets/Test_output00211.ply', function ( geometry ) {
+
+					// mesh
+
+					geometry = geometry.toNonIndexed();
+					const material = new THREE.MeshBasicMaterial( { vertexColors: true } );
+					mesh = new THREE.Mesh( geometry, material );
+
+					scene.add( mesh );
+
+					// gui
+
+					const gui = new GUI();
+					gui.add( mesh, 'visible' ).name( 'show mesh' );
+					gui.open();
+
+					// point cloud
+
+					const sampler = new MeshSurfaceSampler( mesh ).build();
+
+					const vertices = [];
+					const colors = [];
+
+					const vertex = new THREE.Vector3();
+					const normal = new THREE.Vector3();
+					const color = new THREE.Vector3();
+
+					for ( let i = 0; i < 4000; i ++ ) {
+
+						sampler.sample( vertex, normal, color );
+						vertices.push( vertex.x, vertex.y, vertex.z );
+						colors.push( color.x, color.y, color.z );
+
+					}
+
+					const pointsGeometry = new THREE.BufferGeometry();
+					pointsGeometry.setAttribute( 'position', new THREE.Float32BufferAttribute( vertices, 3 ) );
+					pointsGeometry.setAttribute( 'color', new THREE.Float32BufferAttribute( colors, 3 ) );
+
+					const pointsMaterial = new THREE.PointsMaterial( { size: 0.01, vertexColors: true } );
+
+					const points = new THREE.Points( pointsGeometry, pointsMaterial );
+					scene.add( points );
+
+				} );
+
+				// renderer
+
+				renderer = new THREE.WebGLRenderer( { antialias: true } );
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+				container.appendChild( renderer.domElement );
+
+				// resize
+
+				window.addEventListener( 'resize', onWindowResize, false );
+
+				const controls = new OrbitControls( camera, renderer.domElement );
+				controls.minDistance = 1;
+
+			}
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+
+			function animate() {
+
+				requestAnimationFrame( animate );
+
+				renderer.render( scene, camera );
+
+			}
+
+		</script>
+	</body>
+</html>
